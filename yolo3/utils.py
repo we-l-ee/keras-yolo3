@@ -39,7 +39,7 @@ def get_random_data(annotation_line, input_shape, random=True, max_boxes=20, jit
     image = Image.open(line[0])
     iw, ih = image.size
     h, w = input_shape
-    box = np.array([np.array(list(map(int,box.split(',')))) for box in line[1:]])
+    box = np.array([np.array(list(map(float,box.split(',')))) for box in line[1:]])
 
     if not random:
         # resize image
@@ -103,7 +103,7 @@ def get_random_data(annotation_line, input_shape, random=True, max_boxes=20, jit
     image_data = hsv_to_rgb(x) # numpy array, 0 to 1
 
     # correct boxes
-    box_data = np.zeros((max_boxes,5))
+    box_data = np.zeros((max_boxes,6))
     if len(box)>0:
         np.random.shuffle(box)
         box[:, [0,2]] = box[:, [0,2]]*nw/iw + dx
@@ -119,3 +119,46 @@ def get_random_data(annotation_line, input_shape, random=True, max_boxes=20, jit
         box_data[:len(box)] = box
 
     return image_data, box_data
+
+import math
+import cv2
+
+def angledBox2RotatedBox(top, left, bottom, right, theta):
+    hw, hh = math.floor(abs(right - left)/2), math.floor(abs(bottom - top)/2)
+    cx, cy = left + hw, top + hh
+
+    def rotatePoint(xc, yc, xp, yp, theta):
+        xoff = xp - xc;
+        yoff = yp - yc;
+
+        cosTheta = math.cos(theta)
+        sinTheta = math.sin(theta)
+        pResx = cosTheta * xoff + sinTheta * yoff
+        pResy = - sinTheta * xoff + cosTheta * yoff
+        # pRes = (xc + pResx, yc + pResy)
+        return xc + pResx, yc + pResy
+
+    p0 = np.array(rotatePoint(cx, cy, cx - hw, cy - hh, -theta)).astype(np.int32)
+    p1 = np.array(rotatePoint(cx, cy, cx + hw, cy - hh, -theta)).astype(np.int32)
+    p2 = np.array(rotatePoint(cx, cy, cx + hw, cy + hh, -theta)).astype(np.int32)
+    p3 = np.array(rotatePoint(cx, cy, cx - hw, cy + hh, -theta)).astype(np.int32)
+
+    return np.array([p0,p1,p2,p3]), (cx,cy)
+
+def getMaskByAngledBox(shape, top, left, bottom, right, theta):
+    points, _ = angledBox2RotatedBox(top, left, bottom, right, theta)
+    return getMask(points, shape)
+
+def getMask(points, shape):
+    mask = np.zeros(shape, dtype=np.uint8)
+    cv2.fillConvexPoly(mask, points, 255)
+    return mask
+
+def maskImageByAngledBox(image, top, left, bottom, right, theta):
+    points, _ = angledBox2RotatedBox(top, left, bottom, right, theta)
+    return maskImage(points, image)
+
+def maskImage(points, image):
+    mask = np.zeros(image.shape, dtype=np.uint8)
+    cv2.fillConvexPoly(mask, points, 255)
+    return cv2.bitwise_and(image, mask)

@@ -4,6 +4,8 @@
 Run a YOLO_v3 style detection model on test images.
 """
 
+import cv2
+
 import colorsys
 import os
 from timeit import default_timer as timer
@@ -21,18 +23,28 @@ os.environ['CUDA_VISIBLE_DEVICES'] = '0'
 from keras.utils import multi_gpu_model
 gpu_num=1
 
+from yolo3 import utils as Utils
+
+from configparser import ConfigParser
 class YOLO(object):
-    def __init__(self):
-        self.model_path = 'model_data/yolo.h5' # model path or trained weights path
+    def __init__(self, config_file = "config.cfg"):
+        assert(os.path.isfile(config_file))
+        config = ConfigParser()
+        config.read(config_file)
+
+        self.model_path = config.get("Eval", "ModelPath") # model path or trained weights path
         self.anchors_path = 'model_data/yolo_anchors.txt'
-        self.classes_path = 'model_data/coco_classes.txt'
+        self.classes_path = config.get("Eval", "LabelsPath")
+
         self.score = 0.3
         self.iou = 0.45
         self.class_names = self._get_class()
         self.anchors = self._get_anchors()
         self.sess = K.get_session()
         self.model_image_size = (416, 416) # fixed size or (None, None), hw
-        self.boxes, self.scores, self.classes = self.generate()
+        self.boxes, self.scores, self.classes, self.angles = self.generate()
+
+        # self.draw_offsets = np.array([1, 1, -1, 1, -1, -1, 1, -1])
 
     def _get_class(self):
         classes_path = os.path.expanduser(self.classes_path)
@@ -84,10 +96,10 @@ class YOLO(object):
         self.input_image_shape = K.placeholder(shape=(2, ))
         if gpu_num>=2:
             self.yolo_model = multi_gpu_model(self.yolo_model, gpus=gpu_num)
-        boxes, scores, classes = yolo_eval(self.yolo_model.output, self.anchors,
+        boxes, scores, classes, angles = yolo_eval(self.yolo_model.output, self.anchors,
                 len(self.class_names), self.input_image_shape,
                 score_threshold=self.score, iou_threshold=self.iou)
-        return boxes, scores, classes
+        return boxes, scores, classes, angles
 
     def detect_image(self, image):
         start = timer()
@@ -106,15 +118,15 @@ class YOLO(object):
         image_data /= 255.
         image_data = np.expand_dims(image_data, 0)  # Add batch dimension.
 
-        out_boxes, out_scores, out_classes = self.sess.run(
-            [self.boxes, self.scores, self.classes],
+        out_boxes, out_scores, out_classes, out_angles = self.sess.run(
+            [self.boxes, self.scores, self.classes, self.angles],
             feed_dict={
                 self.yolo_model.input: image_data,
                 self.input_image_shape: [image.size[1], image.size[0]],
                 K.learning_phase(): 0
             })
 
-        print('Found {} boxes for {}'.format(len(out_boxes), 'img'))
+        print('Found {} boxes and {} angles for {}'.format(len(out_boxes), len(out_angles),'img'))
 
         font = ImageFont.truetype(font='font/FiraMono-Medium.otf',
                     size=np.floor(3e-2 * image.size[1] + 0.5).astype('int32'))
@@ -124,37 +136,136 @@ class YOLO(object):
             predicted_class = self.class_names[c]
             box = out_boxes[i]
             score = out_scores[i]
+            theta = out_angles[i]
+            print("Outputs box and theta", box, theta)
 
             label = '{} {:.2f}'.format(predicted_class, score)
             draw = ImageDraw.Draw(image)
             label_size = draw.textsize(label, font)
 
             top, left, bottom, right = box
+
+            points, (cx,cy) = Utils.angledBox2RotatedBox(top,left, bottom, right, theta)
+
             top = max(0, np.floor(top + 0.5).astype('int32'))
             left = max(0, np.floor(left + 0.5).astype('int32'))
             bottom = min(image.size[1], np.floor(bottom + 0.5).astype('int32'))
             right = min(image.size[0], np.floor(right + 0.5).astype('int32'))
             print(label, (left, top), (right, bottom))
 
+
+
             if top - label_size[1] >= 0:
-                text_origin = np.array([left, top - label_size[1]])
+                text_origin = np.array([cx, cy - label_size[1]])
             else:
-                text_origin = np.array([left, top + 1])
+                text_origin = np.array([cx, cy + 1])
 
             # My kingdom for a good redistributable image drawing library.
-            for i in range(thickness):
-                draw.rectangle(
-                    [left + i, top + i, right - i, bottom - i],
-                    outline=self.colors[c])
+            # for i in range(thickness):
+            #     draw.rectangle(
+            #         [left + i, top + i, right - i, bottom - i],
+            #         outline=self.colors[c])
+
+            points = points.flatten()
+            print(points, theta)
+            print(left,top,right,bottom)
+
+            # Makes sure the points are inside the image.
+            _points = points
+            xs, ys = _points[::1], _points[::2]
+            xs[xs>image.size[0]]=image.size[0]
+            ys[ys>image.size[1]]=image.size[1]
+            xs[xs<0]=0
+            ys[ys<0]=0
+
+            print(tuple(_points[:4]),_points[2:6],_points[4:8], _points.take(range(6,10), mode='wrap'))
+            print(_points[:4],_points[2:6],_points[4:8], _points.take(range(6,10), mode='wrap'))
+
+            # Draws the box
+            draw.line(tuple(_points[:4]), fill=self.colors[c], width=thickness)
+            draw.line(tuple(_points[2:6]), fill=self.colors[c], width=thickness)
+            draw.line(tuple(_points[4:8]), fill=self.colors[c], width=thickness)
+            draw.line(tuple(_points.take(range(6,10), mode='wrap')), fill=self.colors[c], width=thickness)
+
             draw.rectangle(
                 [tuple(text_origin), tuple(text_origin + label_size)],
                 fill=self.colors[c])
+
             draw.text(text_origin, label, fill=(0, 0, 0), font=font)
             del draw
 
         end = timer()
         print(end - start)
         return image
+
+    def segment_image(self, image):
+        '''
+        Simple segmentation by object detection and cropping outside the box.
+        :param image:
+        :return:
+        '''
+        start = timer()
+
+        if self.model_image_size != (None, None):
+            assert self.model_image_size[0] % 32 == 0, 'Multiples of 32 required'
+            assert self.model_image_size[1] % 32 == 0, 'Multiples of 32 required'
+            boxed_image = letterbox_image(image, tuple(reversed(self.model_image_size)))
+        else:
+            new_image_size = (image.width - (image.width % 32),
+                              image.height - (image.height % 32))
+            boxed_image = letterbox_image(image, new_image_size)
+        image_data = np.array(boxed_image, dtype='float32')
+
+        print(image_data.shape)
+        image_data /= 255.
+        image_data = np.expand_dims(image_data, 0)  # Add batch dimension.
+
+        out_boxes, out_scores, out_classes, out_angles = self.sess.run(
+            [self.boxes, self.scores, self.classes, self.angles],
+            feed_dict={
+                self.yolo_model.input: image_data,
+                self.input_image_shape: [image.size[1], image.size[0]],
+                K.learning_phase(): 0
+            })
+
+        print('Found {} boxes and {} angles for {}'.format(len(out_boxes), len(out_angles), 'img'))
+
+        font = ImageFont.truetype(font='font/FiraMono-Medium.otf',
+                                  size=np.floor(3e-2 * image.size[1] + 0.5).astype('int32'))
+        thickness = (image.size[0] + image.size[1]) // 300
+
+        total_mask = np.zeros(image_data.shape)
+        for i, c in reversed(list(enumerate(out_classes))):
+            predicted_class = self.class_names[c]
+            box = out_boxes[i]
+            score = out_scores[i]
+            theta = out_angles[i]
+            print("Outputs box and theta", box, theta)
+
+            label = '{} {:.2f}'.format(predicted_class, score)
+            draw = ImageDraw.Draw(image)
+            label_size = draw.textsize(label, font)
+
+            top, left, bottom, right = box
+
+            total_mask = cv2.bitwise_or(total_mask, Utils.getMaskByAngledBox(image_data.shape, top, left, bottom, right, theta))
+
+            top = max(0, np.floor(top + 0.5).astype('int32'))
+            left = max(0, np.floor(left + 0.5).astype('int32'))
+            bottom = min(image.size[1], np.floor(bottom + 0.5).astype('int32'))
+            right = min(image.size[0], np.floor(right + 0.5).astype('int32'))
+            print(label, (left, top), (right, bottom))
+
+            # My kingdom for a good redistributable image drawing library.
+            # for i in range(thickness):
+            #     draw.rectangle(
+            #         [left + i, top + i, right - i, bottom - i],
+            #         outline=self.colors[c])
+
+
+        end = timer()
+        print(end - start)
+        return cv2.bitwise_and(image, total_mask)
 
     def close_session(self):
         self.sess.close()
@@ -207,12 +318,15 @@ def detect_img(yolo):
         img = input('Input image filename:')
         try:
             image = Image.open(img)
+            image = image.convert('RGB')
         except:
             print('Open Error! Try again!')
             continue
         else:
             r_image = yolo.detect_image(image)
+            r_image.save(os.path.split(img)[1])
             r_image.show()
+
     yolo.close_session()
 
 
