@@ -12,8 +12,13 @@ from keras.models import Model
 from keras.regularizers import l2
 from keras.losses import hinge
 
-from yolo3.utils import compose
 import math
+
+try:
+    from .utils import compose
+except:
+    from yolo3.utils import compose
+
 
 @wraps(Conv2D)
 def DarknetConv2D(*args, **kwargs):
@@ -301,7 +306,7 @@ def preprocess_true_boxes(true_boxes, input_shape, anchors, num_classes):
     y_true: list of array, shape like yolo_outputs, xywh are relative value
 
     '''
-    assert (true_boxes[..., 4]<num_classes).all(), 'class id must be less than num_classes'
+    assert (true_boxes[..., 5]<num_classes).all(), 'class id must be less than num_classes'
     num_layers = len(anchors)//3 # default setting
     anchor_mask = [[6,7,8], [3,4,5], [0,1,2]] if num_layers==3 else [[3,4,5], [1,2,3]]
 
@@ -357,6 +362,49 @@ def preprocess_true_boxes(true_boxes, input_shape, anchors, num_classes):
                     # print(y_true[l][b, j, i, k, 5])
     return y_true
 
+def box_IoU(b1, b2):
+    '''Return iou tensor
+
+    Rotated.
+
+    Parameters
+    ----------
+    b1: tensor, shape=(i1,...,iN, 5), xywht
+    b2: tensor, shape=(j, 5), xywht
+
+    t for theta
+
+    Returns
+    -------
+    iou: tensor, shape=(i1,...,iN, j)
+
+    '''
+
+    # Expand dim to apply broadcasting.
+    b1 = K.expand_dims(b1, -2)
+    b1_xy = b1[..., :2]
+    b1_wh = b1[..., 2:4]
+    b1_wh_half = b1_wh/2.
+    b1_mins = b1_xy - b1_wh_half
+    b1_maxes = b1_xy + b1_wh_half
+
+    # Expand dim to apply broadcasting.
+    b2 = K.expand_dims(b2, 0)
+    b2_xy = b2[..., :2]
+    b2_wh = b2[..., 2:4]
+    b2_wh_half = b2_wh/2.
+    b2_mins = b2_xy - b2_wh_half
+    b2_maxes = b2_xy + b2_wh_half
+
+    intersect_mins = K.maximum(b1_mins, b2_mins)
+    intersect_maxes = K.minimum(b1_maxes, b2_maxes)
+    intersect_wh = K.maximum(intersect_maxes - intersect_mins, 0.)
+    intersect_area = intersect_wh[..., 0] * intersect_wh[..., 1]
+    b1_area = b1_wh[..., 0] * b1_wh[..., 1]
+    b2_area = b2_wh[..., 0] * b2_wh[..., 1]
+    iou = intersect_area / (b1_area + b2_area - intersect_area)
+
+    return iou
 
 def box_ArIoU(b1, b2):
     '''Return iou tensor
@@ -401,12 +449,14 @@ def box_ArIoU(b1, b2):
     iou = intersect_area / (b1_area + b2_area - intersect_area)
 
     b1_theta = b1[..., 4]
-    b2_theta = b2[..., 4]
+    # Second theta is true box 4th element is confidence 5th is theta
+    # TODO: fix it so that 4th will be theta eveywhere.
+    b2_theta = b2[..., 5]
 
-    return iou*abs(K.cos(b1_theta) - K.cos(b2_theta))
+    return iou*K.abs(K.cos(b2_theta) - K.cos(b1_theta))
 
 
-def yolo_loss(args, anchors, num_classes, ignore_thresh=.5, print_loss=True):
+def yolo_loss(args, anchors, num_classes, ignore_thresh=.5, print_loss=False):
     '''Return yolo_loss tensor
 
     Parameters
@@ -438,9 +488,9 @@ def yolo_loss(args, anchors, num_classes, ignore_thresh=.5, print_loss=True):
         true_thetas = y_true[l][..., 5:6]
         true_class_probs = y_true[l][..., 6:]
 
-        grid, raw_pred, pred_xy, pred_wh, box_theta = yolo_head(yolo_outputs[l],
+        grid, raw_pred, pred_xy, pred_wh, pred_thetas = yolo_head(yolo_outputs[l],
              anchors[anchor_mask[l]], num_classes, input_shape, calc_loss=True)
-        pred_box = K.concatenate([pred_xy, pred_wh, box_theta])
+        pred_box = K.concatenate([pred_xy, pred_wh, pred_thetas])
 
         # Darknet raw box to calculate loss.
         raw_true_xy = y_true[l][..., :2]*grid_shapes[l][::-1] - grid
@@ -452,7 +502,8 @@ def yolo_loss(args, anchors, num_classes, ignore_thresh=.5, print_loss=True):
         ignore_mask = tf.TensorArray(K.dtype(y_true[0]), size=1, dynamic_size=True)
         object_mask_bool = K.cast(object_mask, 'bool')
         def loop_body(b, ignore_mask):
-            true_box = tf.boolean_mask(y_true[l][b,...,0:5], object_mask_bool[b,...,0])
+            # xywhct > 5th elements is theta
+            true_box = tf.boolean_mask(y_true[l][b,...,0:6], object_mask_bool[b,...,0])
             iou = box_ArIoU(pred_box[b], true_box)
             best_iou = K.max(iou, axis=-1)
             ignore_mask = ignore_mask.write(b, K.cast(best_iou<ignore_thresh, K.dtype(true_box)))
@@ -467,10 +518,11 @@ def yolo_loss(args, anchors, num_classes, ignore_thresh=.5, print_loss=True):
         confidence_loss = object_mask * K.binary_crossentropy(object_mask, raw_pred[...,4:5], from_logits=True)+ \
             (1-object_mask) * K.binary_crossentropy(object_mask, raw_pred[...,4:5], from_logits=True) * ignore_mask
 
-        # box_theta = tf.Print(box_theta, [np.max(box_theta)], message='predict thetas:')
+        # pred_thetas = tf.Print(pred_thetas, [np.max(pred_thetas)], message='predict thetas:')
         # true_thetas = tf.Print(true_thetas, [np.max(true_thetas)], message='target thetas:')
 
-        theta_loss = object_mask * K.abs(K.cos(true_thetas)-K.cos(box_theta))*10
+        # theta_loss = object_mask * K.abs(K.sin(true_thetas - pred_thetas)/K.cos(true_thetas - pred_thetas))
+        # theta_loss = object_mask * K.abs(K.cos(true_thetas)-K.cos(pred_thetas))*10
 
         class_loss = object_mask * K.binary_crossentropy(true_class_probs, raw_pred[...,6:], from_logits=True)
 
@@ -480,9 +532,102 @@ def yolo_loss(args, anchors, num_classes, ignore_thresh=.5, print_loss=True):
         wh_loss = K.sum(wh_loss) / mf
         confidence_loss = K.sum(confidence_loss) / mf
         class_loss = K.sum(class_loss) / mf
-        theta_loss = K.sum(theta_loss)/ mf
-        loss += xy_loss + wh_loss + confidence_loss + class_loss + theta_loss
+
+        # theta_loss = K.sum(theta_loss)/ mf
+
+        loss += xy_loss + wh_loss + confidence_loss + class_loss \
+                # + theta_loss
 
         if print_loss:
-            loss = tf.Print(loss, [loss, xy_loss, wh_loss, theta_loss, confidence_loss, class_loss, K.sum(ignore_mask)], message='loss: ')
+            loss = tf.Print(loss, [loss, xy_loss, wh_loss,
+                                   # theta_loss,
+                                   confidence_loss, class_loss, K.sum(ignore_mask)], message='loss: ')
+    return loss
+
+def yolo_rloss(args, anchors, num_classes, ignore_thresh=.5, print_loss=False):
+    '''Return yolo_loss tensor
+
+    Parameters
+    ----------
+    yolo_outputs: list of tensor, the output of yolo_body or tiny_yolo_body
+    y_true: list of array, the output of preprocess_true_boxes
+    anchors: array, shape=(N, 2), wh
+    num_classes: integer
+    ignore_thresh: float, the iou threshold whether to ignore object confidence loss
+
+    Returns
+    -------
+    loss: tensor, shape=(1,)
+
+    '''
+    num_layers = len(anchors)//3 # default setting
+    yolo_outputs = args[:num_layers]
+    y_true = args[num_layers:]
+    anchor_mask = [[6,7,8], [3,4,5], [0,1,2]] if num_layers==3 else [[3,4,5], [1,2,3]]
+    input_shape = K.cast(K.shape(yolo_outputs[0])[1:3] * 32, K.dtype(y_true[0]))
+    grid_shapes = [K.cast(K.shape(yolo_outputs[l])[1:3], K.dtype(y_true[0])) for l in range(num_layers)]
+    loss = 0
+    m = K.shape(yolo_outputs[0])[0] # batch size, tensor
+    mf = K.cast(m, K.dtype(yolo_outputs[0]))
+
+    for l in range(num_layers):
+
+        object_mask = y_true[l][..., 4:5]
+        true_thetas = y_true[l][..., 5:6]
+        true_class_probs = y_true[l][..., 6:]
+
+        grid, raw_pred, pred_xy, pred_wh, pred_thetas = yolo_head(yolo_outputs[l],
+             anchors[anchor_mask[l]], num_classes, input_shape, calc_loss=True)
+        pred_box = K.concatenate([pred_xy, pred_wh, pred_thetas])
+
+        # Darknet raw box to calculate loss.
+        raw_true_xy = y_true[l][..., :2]*grid_shapes[l][::-1] - grid
+        raw_true_wh = K.log(y_true[l][..., 2:4] / anchors[anchor_mask[l]] * input_shape[::-1])
+        raw_true_wh = K.switch(object_mask, raw_true_wh, K.zeros_like(raw_true_wh)) # avoid log(0)=-inf
+        box_loss_scale = 2 - y_true[l][...,2:3]*y_true[l][...,3:4]
+
+        # Find ignore mask, iterate over each of batch.
+        ignore_mask = tf.TensorArray(K.dtype(y_true[0]), size=1, dynamic_size=True)
+        object_mask_bool = K.cast(object_mask, 'bool')
+        def loop_body(b, ignore_mask):
+            # xywhct > 5th elements is theta
+            true_box = tf.boolean_mask(y_true[l][b,...,0:6], object_mask_bool[b,...,0])
+            iou = box_ArIoU(pred_box[b], true_box)
+            best_iou = K.max(iou, axis=-1)
+            ignore_mask = ignore_mask.write(b, K.cast(best_iou<ignore_thresh, K.dtype(true_box)))
+            return b+1, ignore_mask
+        _, ignore_mask = K.control_flow_ops.while_loop(lambda b,*args: b<m, loop_body, [0, ignore_mask])
+        ignore_mask = ignore_mask.stack()
+        ignore_mask = K.expand_dims(ignore_mask, -1)
+
+        # K.binary_crossentropy is helpful to avoid exp overflow.
+        xy_loss = object_mask * box_loss_scale * K.binary_crossentropy(raw_true_xy, raw_pred[...,0:2], from_logits=True)
+        wh_loss = object_mask * box_loss_scale * 0.5 * K.square(raw_true_wh-raw_pred[...,2:4])
+        confidence_loss = object_mask * K.binary_crossentropy(object_mask, raw_pred[...,4:5], from_logits=True)+ \
+            (1-object_mask) * K.binary_crossentropy(object_mask, raw_pred[...,4:5], from_logits=True) * ignore_mask
+
+        # pred_thetas = tf.Print(pred_thetas, [np.max(pred_thetas)], message='predict thetas:')
+        # true_thetas = tf.Print(true_thetas, [np.max(true_thetas)], message='target thetas:')
+
+        # theta_loss = object_mask * K.abs(K.sin(true_thetas - pred_thetas)/K.cos(true_thetas - pred_thetas))
+        theta_loss = object_mask * K.abs(K.cos(true_thetas)-K.cos(pred_thetas))*10
+
+        class_loss = object_mask * K.binary_crossentropy(true_class_probs, raw_pred[...,6:], from_logits=True)
+
+
+
+        xy_loss = K.sum(xy_loss) / mf
+        wh_loss = K.sum(wh_loss) / mf
+        confidence_loss = K.sum(confidence_loss) / mf
+        class_loss = K.sum(class_loss) / mf
+
+        theta_loss = K.sum(theta_loss)/ mf
+
+        loss += xy_loss + wh_loss + confidence_loss + class_loss \
+                + theta_loss
+
+        if print_loss:
+            loss = tf.Print(loss, [loss, xy_loss, wh_loss,
+                                   theta_loss,
+                                   confidence_loss, class_loss, K.sum(ignore_mask)], message='loss: ')
     return loss

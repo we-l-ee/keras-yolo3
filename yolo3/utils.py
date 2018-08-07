@@ -84,9 +84,9 @@ def get_random_data(annotation_line, input_shape, random=True, max_boxes=20, jit
     new_image.paste(image, (dx, dy))
     image = new_image
 
-    # flip image or not
-    flip = rand()<.5
-    if flip: image = image.transpose(Image.FLIP_LEFT_RIGHT)
+    # # flip image or not
+    # flip = rand()<.5
+    # if flip: image = image.transpose(Image.FLIP_LEFT_RIGHT)
 
     # distort image
     hue = rand(-hue, hue)
@@ -108,7 +108,7 @@ def get_random_data(annotation_line, input_shape, random=True, max_boxes=20, jit
         np.random.shuffle(box)
         box[:, [0,2]] = box[:, [0,2]]*nw/iw + dx
         box[:, [1,3]] = box[:, [1,3]]*nh/ih + dy
-        if flip: box[:, [0,2]] = w - box[:, [2,0]]
+        # if flip: box[:, [0,2]] = w - box[:, [2,0]]
         box[:, 0:2][box[:, 0:2]<0] = 0
         box[:, 2][box[:, 2]>w] = w
         box[:, 3][box[:, 3]>h] = h
@@ -151,7 +151,13 @@ def getMaskByAngledBox(shape, top, left, bottom, right, theta):
 
 def getMask(points, shape):
     mask = np.zeros(shape, dtype=np.uint8)
-    cv2.fillConvexPoly(mask, points, 255)
+
+    for i in range(shape[2]):
+        mask_ch = np.zeros(shape[:2]+(1,), dtype=np.uint8)
+        cv2.fillConvexPoly(mask_ch, points, 255)
+        mask[...,i:i+1] = mask_ch
+
+    print(mask.shape)
     return mask
 
 def maskImageByAngledBox(image, top, left, bottom, right, theta):
@@ -159,6 +165,5 @@ def maskImageByAngledBox(image, top, left, bottom, right, theta):
     return maskImage(points, image)
 
 def maskImage(points, image):
-    mask = np.zeros(image.shape, dtype=np.uint8)
-    cv2.fillConvexPoly(mask, points, 255)
+    mask = getMask(points, image.shape)
     return cv2.bitwise_and(image, mask)
