@@ -19,6 +19,16 @@ except:
 
 from configparser import ConfigParser
 
+'''
+Model1 = |cos(x)-cos(y)|*10 + ArIoU
+Model2 = ArIoU
+Model3 = |sin(x-y)| + ArIoU
+Model4 = |tan(x-y)| + ArIoU
+Model5 = |tan(x-y)| + IoU
+Model6 = |cos(x)-cos(y)|*10 + IoU
+Model7 = |cos(x)-cos(y)| + IoU
+'''
+
 
 def _main():
     config = ConfigParser()
@@ -47,17 +57,19 @@ def _main():
     #                               freeze_body=2, weights_path=model_path)
     # else:
     model = create_model(input_shape, anchors, num_classes, load_pretrained=load_pretrained,
-                             freeze_body=2, weights_path=model_path)  # make sure you know what you freeze
+                         freeze_body=2, weights_path=model_path)  # make sure you know what you freeze
 
     val_split = config.getfloat("Train", "val_ratio")
     val_print = '-val_loss{val_loss:.3f}' if val_split != 0 else ''
-    save_best_only = True and config.getboolean("Train","best_model_only") if val_split != 0 else False
+    save_best_only = True and config.getboolean("Train", "best_model_only") if val_split != 0 else False
 
-    checkpoint = ModelCheckpoint(os.path.join(log_dir, model_name+'_ep{epoch:05d}-loss{loss:.3f}'+val_print+'.h5'),
-                                 monitor='val_loss', save_weights_only=True, save_best_only=save_best_only,
-                                 period=config.getint("Train", "backup_period"))
+    checkpoint = ModelCheckpoint(
+        os.path.join(log_dir, model_name + '_ep{epoch:05d}-loss{loss:.3f}' + val_print + '.h5'),
+        monitor='val_loss', save_weights_only=True, save_best_only=save_best_only,
+        period=config.getint("Train", "backup_period"))
     from os.path import join
-    cb2 = [checkpoint, CSVLogger(join(config.get("Train","log_folder"), model_name+"_e"+str(last_epoch)+".csv"), append=True)]
+    cb2 = [checkpoint, CSVLogger(join(config.get("Train", "log_folder"), model_name + "_e" + str(last_epoch) + ".csv"),
+                                 append=True)]
 
     # logging = TensorBoard()
 
@@ -65,7 +77,7 @@ def _main():
         cb2.append(ReduceLROnPlateau(monitor='val_loss', factor=0.1, patience=3, verbose=1))
 
     early_stopping = EarlyStopping(monitor='val_loss', min_delta=0, patience=10, verbose=1)
-    
+
     with open(annotation_path) as f:
         lines = f.readlines()
     np.random.seed(10101)
@@ -78,7 +90,7 @@ def _main():
     # Train with frozen layers first, to get a stable loss.
     # Adjust num epochs to your dataset. This step is enough to obtain a not bad model.
     if config.getboolean("Train", "stage1"):
-        lr = config.getfloat("Train","stage1_lr")
+        lr = config.getfloat("Train", "stage1_lr")
 
         model.compile(optimizer=Adam(lr=lr), loss={
             # use custom yolo_loss Lambda layer.
@@ -90,12 +102,12 @@ def _main():
                             validation_data=data_generator_wrapper(lines[num_train:], batch_size, input_shape, anchors,
                                                                    num_classes),
                             validation_steps=max(1, num_val // batch_size),
-                            epochs=last_epoch+config.getint("Train", "stage1_epoch"),
+                            epochs=last_epoch + config.getint("Train", "stage1_epoch"),
                             initial_epoch=last_epoch,
                             callbacks=cb2,
                             verbose=verbose)
         model.save_weights(os.path.join(log_dir, model_name + '_stage1.h5'))
-        last_epoch+=config.getint("Train", "stage1_epoch")
+        last_epoch += config.getint("Train", "stage1_epoch")
 
     # Unfreeze and continue training, to fine-tune.
     # Train longer if the result is not good.
@@ -104,7 +116,7 @@ def _main():
         #     model.layers[i].trainable = True
         # print('Unfreeze all of the layers.')
 
-        lr = config.getfloat("Train","stage2_lr")
+        lr = config.getfloat("Train", "stage2_lr")
         model.compile(optimizer=Adam(lr=lr),
                       loss={'yolo_rloss': lambda y_true, y_pred: y_pred})  # recompile to apply the change
         print('Learning rate:', lr)
@@ -116,7 +128,7 @@ def _main():
                                                                    num_classes)
                             if val_split != 0.0 else None,
                             validation_steps=max(1, num_val // batch_size) if val_split != 0.0 else None,
-                            epochs=last_epoch+config.getint("Train", "stage2_epoch"),
+                            epochs=last_epoch + config.getint("Train", "stage2_epoch"),
                             initial_epoch=last_epoch,
                             callbacks=cb2, verbose=verbose)
         model.save_weights(os.path.join(log_dir, model_name + '_final.h5'))
@@ -168,7 +180,7 @@ def create_model(input_shape, anchors, num_classes, load_pretrained=True, freeze
         [*model_body.output, *y_true])
 
     model_rloss = Lambda(yolo_rloss, output_shape=(1,), name='yolo_rloss',
-                        arguments={'anchors': anchors, 'num_classes': num_classes, 'ignore_thresh': 0.5})(
+                         arguments={'anchors': anchors, 'num_classes': num_classes, 'ignore_thresh': 0.5})(
         [*model_body.output, *y_true])
 
     model = Model([model_body.input, *y_true], [model_loss, model_rloss])

@@ -592,7 +592,13 @@ def yolo_rloss(args, anchors, num_classes, ignore_thresh=.5, print_loss=False):
         def loop_body(b, ignore_mask):
             # xywhct > 5th elements is theta
             true_box = tf.boolean_mask(y_true[l][b,...,0:6], object_mask_bool[b,...,0])
-            iou = box_ArIoU(pred_box[b], true_box)
+
+            '''
+            Rotational box might be commented, it will find more boxes but with slightly less accuracy.
+            '''
+            iou = box_IoU(pred_box[b], true_box)
+            # iou = box_ArIoU(pred_box[b], true_box)
+
             best_iou = K.max(iou, axis=-1)
             ignore_mask = ignore_mask.write(b, K.cast(best_iou<ignore_thresh, K.dtype(true_box)))
             return b+1, ignore_mask
@@ -609,8 +615,12 @@ def yolo_rloss(args, anchors, num_classes, ignore_thresh=.5, print_loss=False):
         # pred_thetas = tf.Print(pred_thetas, [np.max(pred_thetas)], message='predict thetas:')
         # true_thetas = tf.Print(true_thetas, [np.max(true_thetas)], message='target thetas:')
 
+        '''
+        One of these loss is should be used. Most accurate results came from differences of cos so far.
+        '''
         # theta_loss = object_mask * K.abs(K.sin(true_thetas - pred_thetas)/K.cos(true_thetas - pred_thetas))
-        theta_loss = object_mask * K.abs(K.cos(true_thetas)-K.cos(pred_thetas))*10
+        # theta_loss = object_mask * K.abs(K.cos(true_thetas)-K.cos(pred_thetas))*10
+        theta_loss = object_mask * K.abs(K.cos(true_thetas)-K.cos(pred_thetas))
 
         class_loss = object_mask * K.binary_crossentropy(true_class_probs, raw_pred[...,6:], from_logits=True)
 

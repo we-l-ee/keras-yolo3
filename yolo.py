@@ -34,7 +34,10 @@ gpu_num = 1
 
 from configparser import ConfigParser
 
-THETA_DIRECTION=-1
+# TODO: This must be further investigated
+THETA_DIRECTION = -1
+
+
 # THETA_DIRECTION=+1
 
 class YOLO(object):
@@ -144,7 +147,6 @@ class YOLO(object):
                                   size=np.floor(3e-2 * image.size[1] + 0.5).astype('int32'))
         thickness = (image.size[0] + image.size[1]) // 300
 
-
         for i, c in reversed(list(enumerate(out_classes))):
             predicted_class = self.class_names[c]
             box = out_boxes[i]
@@ -158,7 +160,12 @@ class YOLO(object):
 
             top, left, bottom, right = box
 
-            points, (cx, cy) = Utils.angledBox2RotatedBox(top, left, bottom, right, THETA_DIRECTION*theta)
+            '''
+            Learned Direction of theta(counter-clockwise or clockwise) changes loss to loss, Counter-clockwise thetas are
+            provided but some reason it learns that and outputs negative thetas as if it is tuned to clockwise.
+            '''
+
+            points, (cx, cy) = Utils.angledBox2RotatedBox(top, left, bottom, right, THETA_DIRECTION * theta)
 
             top = max(0, np.floor(top + 0.5).astype('int32'))
             left = max(0, np.floor(left + 0.5).astype('int32'))
@@ -207,7 +214,7 @@ class YOLO(object):
 
         end = timer()
         if info: print("Detection done in", end - start)
-        return image, len(out_classes)>0
+        return image, len(out_classes) > 0
 
     def segment_image(self, image, info=True):
         '''
@@ -258,8 +265,13 @@ class YOLO(object):
             top, left, bottom, right = box
 
             # print(total_mask.shape)
+            '''
+            Learned Direction of theta(counter-clockwise or clockwise) changes loss to loss, Counter-clockwise thetas are
+            provided but some reason it learns that and outputs negative thetas as if it is tuned to clockwise.
+            '''
             total_mask = cv2.bitwise_or(total_mask,
-                                        Utils.getMaskByAngledBox(shape, top, left, bottom, right, THETA_DIRECTION*theta))
+                                        Utils.getMaskByAngledBox(shape, top, left, bottom, right,
+                                                                 THETA_DIRECTION * theta))
 
             top = max(0, np.floor(top + 0.5).astype('int32'))
             left = max(0, np.floor(left + 0.5).astype('int32'))
@@ -272,14 +284,14 @@ class YOLO(object):
 
         # If there is no object detection return whole image.
         if total_mask.sum() == 0:
-            return image
+            return image, np.ones(image.shape)
 
         img = cv2.bitwise_and(img, total_mask)
 
         # img[total_mask==0] = 255
 
         # Segment with detection
-        return img
+        return img, total_mask
 
     def close_session(self):
         self.sess.close()
@@ -327,13 +339,12 @@ def detect_video(yolo, video_path, output_path=""):
     yolo.close_session()
 
 
-
-
-
 import glob
 from os.path import join
 from os.path import split
 from os import makedirs
+
+
 def getImageFiles(input_folder, exts=(".jpg", ".gif", ".png", ".tga", ".tif"), recursive=False):
     files = []
     for ext in exts:
@@ -357,6 +368,7 @@ def detect_img(yolo, config):
 
     yolo.close_session()
 
+
 def detect_imgs(yolo, config):
     input_folder, output_folder = config.get("Eval", "input_folder"), config.get("Eval", "output_folder")
 
@@ -364,47 +376,48 @@ def detect_imgs(yolo, config):
     makedirs(output_folder, exist_ok=True)
 
     ret, d = 0, 0
-    for i, img in enumerate(imgs,1):
+    for i, img in enumerate(imgs, 1):
         try:
             image = Image.open(img)
             image = image.convert('RGB')
         except:
-            print('Open',img,' Error! Try again!')
+            print('Open', img, ' Error! Try again!')
             continue
         r_image, detected = yolo.detect_image(image, info=False)
         output_file = join(output_folder, split(img)[1])
         r_image.save(output_file)
-        print('[%.2f]Saved'%(i/len(imgs)*100), output_file)
+        print('[%.2f]Saved' % (i / len(imgs) * 100), output_file)
 
-        ret+=1
+        ret += 1
         if detected:
-            d+=1
+            d += 1
 
-    print("Image detection percentage:%.2f" %(d/ret*100))
+    print("Image detection percentage:%.2f" % (d / ret * 100))
+    with open(join(output_folder, "results.csv"), 'w') as fout:
+        fout.write("Percentage of Detected Images\n")
+        fout.write("%.2f\n" % (d / ret * 100))
+
     yolo.close_session()
+
 
 def segment_imgs(yolo, config):
     input_folder, output_folder = config.get("Eval", "input_folder"), config.get("Eval", "output_folder")
     imgs = getImageFiles(input_folder)
-    ret, d = 0, 0
-    for i, img in enumerate(imgs,1):
+
+    for i, img in enumerate(imgs, 1):
         try:
             image = Image.open(img)
             image = image.convert('RGB')
         except:
-            print('Open',img,' Error! Try again!')
+            print('Open', img, ' Error! Try again!')
             continue
-        r_image, detected = yolo.segment_image(image, info=False)
+        r_image, _ = yolo.segment_image(image, info=False)
         output_file = join(output_folder, split(img)[1])
         r_image.save(output_file)
-        print('[%.2f]Saved'%(i/len(imgs)*100), output_file)
+        print('[%.2f]Saved' % (i / len(imgs) * 100), output_file)
 
-        ret+=1
-        if detected:
-            d+=1
-
-    print("Image detection percentage:%.2f" %(d/ret*100))
     yolo.close_session()
+
 
 def segment_img(yolo, config):
     while True:
@@ -422,6 +435,7 @@ def segment_img(yolo, config):
 
     yolo.close_session()
 
+
 if __name__ == '__main__':
     config_file = "keras_yolo3.cfg"
     assert (os.path.isfile(config_file))
@@ -430,9 +444,7 @@ if __name__ == '__main__':
     mode = config.get("Eval", "mode")
     yolo = YOLO(config=config)
 
-    modes = {'image_detect':detect_img,'image_segment':segment_img,
-             'dataset_detect':detect_imgs,'dataset_segment':segment_imgs}
+    modes = {'image_detect': detect_img, 'image_segment': segment_img,
+             'dataset_detect': detect_imgs, 'dataset_segment': segment_imgs}
 
     modes[mode](yolo, config)
-
-
